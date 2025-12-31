@@ -10,7 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +22,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
       - run: npm ci
@@ -35,16 +36,16 @@ jobs:
           echo "version=$(date -u +%Y.%-m.%-d)" >> $GITHUB_OUTPUT
           echo "tag=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
 
-      - name: Set package version
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: npm version "$VERSION" --no-git-tag-version
-
-      - name: Publish to npm
-        run: npm publish --access public
-
       - name: Compress database
         run: gzip -k critical-packages.db
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: database
+          path: |
+            critical-packages.db
+            critical-packages.db.gz
 
       - name: Create release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
@@ -60,3 +61,33 @@ jobs:
             Download the `.db` file for uncompressed SQLite, or `.db.gz` for compressed.
 
             Also available via npm: `npm install @ecosyste-ms/critical@${{ steps.version.outputs.version }}`
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Download database
+        uses: actions/download-artifact@v4
+        with:
+          name: database
+
+      - name: Set package version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version
+
+      - name: Publish to npm
+        run: npm publish --access public
