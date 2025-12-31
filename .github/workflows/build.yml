@@ -1,0 +1,59 @@
+name: Build and Release
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run build
+
+      - name: Get version
+        id: version
+        run: |
+          echo "version=$(date -u +%Y.%-m.%-d)" >> $GITHUB_OUTPUT
+          echo "tag=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+      - name: Set package version
+        run: npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Compress database
+        run: gzip -k critical-packages.db
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: |
+            critical-packages.db
+            critical-packages.db.gz
+          body: |
+            Daily build of critical packages database.
+
+            Download the `.db` file for uncompressed SQLite, or `.db.gz` for compressed.
+
+            Also available via npm: `npm install @ecosyste-ms/critical@${{ steps.version.outputs.version }}`

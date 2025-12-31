@@ -1,0 +1,43 @@
+{
+  "name": "@ecosyste-ms/critical",
+  "version": "1.0.0",
+  "description": "SQLite database of critical packages from ecosyste.ms",
+  "main": "./lib/index.js",
+  "type": "module",
+  "bin": {
+    "critical": "bin.js"
+  },
+  "scripts": {
+    "build": "node bin.js",
+    "test": "node test/index.js"
+  },
+  "keywords": [
+    "ecosystems",
+    "packages",
+    "sqlite",
+    "critical",
+    "sbom",
+    "vulnerabilities"
+  ],
+  "license": "CC-BY-SA-4.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ecosyste-ms/critical.git"
+  },
+  "files": [
+    "lib",
+    "bin.js",
+    "README.md",
+    "LICENSE",
+    "critical-packages.db"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  }
+}
