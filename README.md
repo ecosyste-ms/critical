@@ -20,6 +20,8 @@ const db = new Database(databasePath)
 const pkg = db.prepare('SELECT * FROM packages WHERE name = ?').get('lodash')
 ```
 
+See [ecosyste-ms/mcp](https://github.com/ecosyste-ms/mcp) for a full example.
+
 ## Download
 
 You can also grab the database directly from the [releases page](../../releases/latest):
