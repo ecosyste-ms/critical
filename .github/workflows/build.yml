@@ -13,6 +13,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      exists: ${{ steps.check_release.outputs.exists }}
 
     steps:
       - uses: actions/checkout@v4
@@ -33,8 +34,9 @@ jobs:
       - name: Get version
         id: version
         run: |
-          echo "version=$(date -u +%Y.%-m.%-d)" >> $GITHUB_OUTPUT
-          echo "tag=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          MAJOR_MINOR=$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')")
+          echo "version=${MAJOR_MINOR}.$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "tag=v${MAJOR_MINOR}.$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
 
       - name: Compress database
         run: gzip -k critical-packages.db
@@ -47,7 +49,19 @@ jobs:
             critical-packages.db
             critical-packages.db.gz
 
+      - name: Check if release exists
+        id: check_release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create release
+        if: steps.check_release.outputs.exists == 'false'
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -84,10 +98,20 @@ jobs:
         with:
           name: database
 
+      - name: Install latest npm
+        run: npm install -g npm@latest
+
       - name: Set package version
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: npm version "$VERSION" --no-git-tag-version
 
       - name: Publish to npm
-        run: npm publish --access public
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if npm view "@ecosyste-ms/critical@$VERSION" version 2>/dev/null; then
+            echo "Version $VERSION already published, skipping"
+          else
+            npm publish --access public
+          fi

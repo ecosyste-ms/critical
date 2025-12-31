@@ -2,7 +2,7 @@
 
 SQLite database of critical open source packages from [ecosyste.ms](https://packages.ecosyste.ms).
 
-The database is rebuilt daily and published to npm and as a GitHub release. Versions use CalVer (`YYYY.M.D`).
+The database is rebuilt daily and published to npm and as a GitHub release. Versions use `MAJOR.MINOR.YYYYMMDD` where major/minor track schema changes and patch is the build date.
 
 ## Install
 

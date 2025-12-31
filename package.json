@@ -29,7 +29,7 @@
     "bin.js",
     "README.md",
     "LICENSE",
-    "critical-packages.db"
+    "critical-packages.db.gz"
   ],
   "publishConfig": {
     "access": "public"
