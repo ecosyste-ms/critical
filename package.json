@@ -35,9 +35,6 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=18.0.0"
-  },
-  "dependencies": {
-    "better-sqlite3": "^12.5.0"
+    "node": ">=22.5.0"
   }
 }

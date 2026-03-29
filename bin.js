@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { build, databasePath } from './lib/index.js'
-import Database from 'better-sqlite3'
+import { DatabaseSync } from 'node:sqlite'
 import { existsSync } from 'fs'
 
 const args = process.argv.slice(2)
@@ -40,7 +40,7 @@ if (args.includes('--stats')) {
     console.error(`Database not found: ${path}`)
     process.exit(1)
   }
-  const db = new Database(path, { readonly: true })
+  const db = new DatabaseSync(path, { readOnly: true })
   const info = db.prepare('SELECT * FROM build_info WHERE id = 1').get()
   const packageCount = db.prepare('SELECT COUNT(*) as count FROM packages').get().count
   const versionCount = db.prepare('SELECT COUNT(*) as count FROM versions').get().count

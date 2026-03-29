@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3'
+import { DatabaseSync } from 'node:sqlite'
 import { createDatabase, databasePath } from '../lib/index.js'
 import { unlinkSync, existsSync } from 'fs'
 import { execSync } from 'child_process'
