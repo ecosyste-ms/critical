@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import { createDatabase, databasePath } from '../lib/index.js'
+import { createDatabase, databasePath, insertRepoMetadata } from '../lib/index.js'
 import { unlinkSync, existsSync } from 'fs'
 import { execSync } from 'child_process'
 import { dirname, join } from 'path'
@@ -332,6 +332,51 @@ test('insert package with advisories from API shape', () => {
   assert.equal(advisories.length, 2, 'inserted 2 advisories')
   assert.equal(advisories[0].severity, 'HIGH')
   assert.equal(advisories[1].severity, 'MODERATE')
+})
+
+test('insertRepoMetadata handles partial repo_metadata without name/host', () => {
+  // Real-world API shape: ~10% of critical packages have repo_metadata with
+  // full_name but no name field, and no host object at all. node:sqlite rejects
+  // undefined bindings, so these must be coerced to null.
+  integrationDb.prepare(`
+    INSERT INTO packages (id, ecosystem, name, purl)
+    VALUES (998, 'pypi', 'pytest-asyncio', 'pkg:pypi/pytest-asyncio')
+  `).run()
+
+  const repoMetadata = {
+    id: 30205473,
+    uuid: '33756412',
+    full_name: 'pytest-dev/pytest-asyncio',
+    owner: 'pytest-dev',
+    description: 'Asyncio support for pytest',
+    archived: false,
+    fork: false,
+    stargazers_count: 1398,
+    open_issues_count: 52,
+    forks_count: 145
+    // note: no `name`, no `language` — and host is undefined below
+  }
+
+  assert.doesNotThrow(() => {
+    insertRepoMetadata(integrationDb, 998, repoMetadata, undefined)
+  }, 'inserts without throwing when name/host are missing')
+
+  const row = integrationDb.prepare('SELECT * FROM repo_metadata WHERE package_id = ?').get(998)
+  assert(row, 'row was inserted')
+  assert.equal(row.owner, 'pytest-dev')
+  assert.equal(row.full_name, 'pytest-dev/pytest-asyncio')
+  assert.equal(row.repo_name, null, 'missing name stored as null')
+  assert.equal(row.host, null, 'missing host stored as null')
+  assert.equal(row.language, null, 'missing language stored as null')
+  assert.equal(row.stargazers_count, 1398)
+})
+
+test('insertRepoMetadata skips when repoMetadata is null', () => {
+  assert.doesNotThrow(() => {
+    insertRepoMetadata(integrationDb, 997, null, { name: 'github.com' })
+  })
+  const row = integrationDb.prepare('SELECT * FROM repo_metadata WHERE package_id = ?').get(997)
+  assert.equal(row, undefined, 'no row inserted for null repoMetadata')
 })
 
 test('handles null/empty advisories', () => {
