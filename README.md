@@ -14,9 +14,9 @@ The package includes a pre-built `critical-packages.db` file:
 
 ```javascript
 import { databasePath } from '@ecosyste-ms/critical'
-import Database from 'better-sqlite3'
+import { DatabaseSync } from 'node:sqlite'
 
-const db = new Database(databasePath)
+const db = new DatabaseSync(databasePath)
 const pkg = db.prepare('SELECT * FROM packages WHERE name = ?').get('lodash')
 ```
 
