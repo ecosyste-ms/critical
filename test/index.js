@@ -1,6 +1,9 @@
 import { DatabaseSync } from 'node:sqlite'
-import { createDatabase, databasePath, insertRepoMetadata } from '../lib/index.js'
-import { unlinkSync, existsSync } from 'fs'
+import { createDatabase, databasePath, insertRepoMetadata, extractDatabase } from '../lib/index.js'
+import { unlinkSync, existsSync, mkdtempSync, readdirSync, rmSync, createReadStream, createWriteStream } from 'fs'
+import { tmpdir } from 'os'
+import { createGzip } from 'zlib'
+import { pipeline } from 'stream/promises'
 import { execSync } from 'child_process'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -15,6 +18,17 @@ function cleanup() {
   if (existsSync(TEST_DB)) unlinkSync(TEST_DB)
   if (existsSync(TEST_DB + '-wal')) unlinkSync(TEST_DB + '-wal')
   if (existsSync(TEST_DB + '-shm')) unlinkSync(TEST_DB + '-shm')
+}
+
+async function testAsync(name, fn) {
+  try {
+    await fn()
+    console.log(`PASS: ${name}`)
+  } catch (err) {
+    console.error(`FAIL: ${name}`)
+    console.error(err)
+    process.exitCode = 1
+  }
 }
 
 function test(name, fn) {
@@ -458,4 +472,73 @@ test('cli --stats shows database info', () => {
   if (existsSync(statsDbPath + '-shm')) unlinkSync(statsDbPath + '-shm')
 })
 
-console.log('\nAll tests passed!')
+// Extraction
+console.log('\nExtraction tests:')
+
+// The corruption this guards against -- concurrent importers streaming into the same
+// path -- needs the real 35MB database and separate processes to reproduce as torn
+// bytes. What is asserted here instead is the invariant that makes it impossible:
+// whenever the destination exists at all it is a complete, openable database, because
+// it is only ever renamed into place whole.
+await testAsync('extractDatabase publishes the destination atomically', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'critical-extract-'))
+  const sourceDb = join(tmpDir, 'source.db')
+  const source = join(tmpDir, 'fixture.db.gz')
+  const destination = join(tmpDir, 'fixture.db')
+
+  // Large enough that the extraction spans several event loop turns, so the polling
+  // below actually samples while it is in flight.
+  const fixtureDb = createDatabase(sourceDb)
+  const padding = 'x'.repeat(4096)
+  const insert = fixtureDb.prepare('INSERT INTO packages (id, ecosystem, name, description) VALUES (?, ?, ?, ?)')
+  for (let i = 0; i < 2000; i++) insert.run(i, 'npm', `pkg-${i}`, padding)
+  fixtureDb.close()
+  await pipeline(createReadStream(sourceDb), createGzip(), createWriteStream(source))
+
+  function readRowCount() {
+    const db = new DatabaseSync(destination, { readOnly: true })
+    try {
+      return db.prepare('SELECT COUNT(*) AS count FROM packages').get().count
+    } finally {
+      db.close()
+    }
+  }
+
+  let sawTemp = false
+  let destinationObservations = 0
+  let done = false
+  const extracting = extractDatabase(source, destination).finally(() => { done = true })
+
+  // The rename can land on disk a tick before its callback resolves the promise, so
+  // seeing the destination here is expected. What must never happen is seeing it
+  // half-written: every observation has to be a complete database.
+  while (!done) {
+    const entries = readdirSync(tmpDir)
+    if (entries.some(f => f.startsWith('fixture.db.') && f.endsWith('.tmp'))) sawTemp = true
+    if (existsSync(destination)) {
+      destinationObservations++
+      assert.strictEqual(readRowCount(), 2000, 'destination is complete every time it is visible')
+    }
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  await extracting
+
+  assert(sawTemp, 'extraction went through a temp file (the window was sampled)')
+
+  assert.strictEqual(readRowCount(), 2000, 'extracted database is intact')
+
+  assert.strictEqual(
+    readdirSync(tmpDir).filter(f => f.endsWith('.tmp')).length,
+    0,
+    'no temp files left behind'
+  )
+
+  console.log(`  (sampled the destination ${destinationObservations} time(s) during extraction)`)
+  rmSync(tmpDir, { recursive: true, force: true })
+})
+
+if (process.exitCode) {
+  console.error('\nSome tests failed.')
+} else {
+  console.log('\nAll tests passed!')
+}
