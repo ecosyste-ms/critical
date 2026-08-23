@@ -14,6 +14,11 @@ Options:
   --stats               Show database statistics
   --help, -h            Show this help message
 
+Environment:
+  ECOSYSTEMS_MAILTO     Contact address sent to the API. Without it the build runs on
+                        the anonymous rate-limit tier (~5,000 requests/hour against
+                        ~9,700 needed) and aborts once too many version fetches fail.
+
 Examples:
   npx @ecosyste-ms/critical
   npx @ecosyste-ms/critical --skip-versions

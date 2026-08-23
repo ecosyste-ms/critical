@@ -33,3 +33,14 @@ export function createTempDatabase(name = "critical.db"): TempDatabase {
     },
   };
 }
+
+/**
+ * A `createDatabase()` fixture held in memory.
+ *
+ * The same schema, without the temp directory a per-test on-disk fixture pays for in
+ * mkdtemp, WAL creation and the recursive remove. Use this wherever a test only
+ * exercises SQL; `createTempDatabase` is for tests that need a real file.
+ */
+export function createMemoryDatabase(): DatabaseSync {
+  return createDatabase(":memory:");
+}
