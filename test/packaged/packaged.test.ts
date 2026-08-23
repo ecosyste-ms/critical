@@ -1,6 +1,5 @@
 import { execFileSync, execSync, spawnSync } from "node:child_process";
 import {
-  cpSync,
   createReadStream,
   createWriteStream,
   existsSync,
@@ -24,7 +23,8 @@ const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
  * exhaustive rather than a subset: adding an export is a deliberate edit here too.
  *
  * The seven 1.1.0 shipped, plus `insertAdvisories` / `insertPackage` / `insertVersions`,
- * exported in 1.2.0 so the tests can drive them instead of retyping their SQL.
+ * exported in 1.2.0 so the tests can drive them instead of retyping their SQL, plus
+ * `registryFor`, exported in 1.3.0 when registry routing moved to the SDK.
  */
 const EXPECTED_EXPORTS = [
   "build",
@@ -37,11 +37,32 @@ const EXPECTED_EXPORTS = [
   "insertPackage",
   "insertRepoMetadata",
   "insertVersions",
+  "registryFor",
 ];
 
 let workDir: string;
 let packageDir: string;
 let tarballPath: string;
+let consumerDir: string;
+
+/**
+ * Installs the packed tarball into a fresh consumer project and returns its root.
+ *
+ * The package has a dependency, so an unpacked tarball has no `node_modules` to resolve
+ * it from. Installing is also the path a real consumer takes.
+ */
+function installTarball(prefix: string): string {
+  const consumerDir = mkdtempSync(join(tmpdir(), prefix));
+  writeFileSync(
+    join(consumerDir, "package.json"),
+    JSON.stringify({ name: "consumer", version: "1.0.0", private: true }),
+  );
+  execSync(`npm install --no-save --no-audit --no-fund --ignore-scripts "${tarballPath}"`, {
+    cwd: consumerDir,
+    stdio: "pipe",
+  });
+  return consumerDir;
+}
 // biome-ignore lint/suspicious/noExplicitAny: the entrypoint is loaded from a tarball, not typed source.
 let entrypoint: any;
 
@@ -53,15 +74,16 @@ beforeAll(async () => {
   execSync(`npm pack --pack-destination "${workDir}"`, { cwd: projectRoot, stdio: "pipe" });
   const tarball = readdirSync(workDir).find((f) => f.endsWith(".tgz"));
   expect(tarball, "npm pack produced a tarball").toBeTruthy();
-  execFileSync("tar", ["-xzf", tarball as string], { cwd: workDir });
   tarballPath = join(workDir, tarball as string);
 
-  packageDir = join(workDir, "package");
+  consumerDir = installTarball("critical-consumer-");
+  packageDir = join(consumerDir, "node_modules", "@ecosyste-ms", "critical");
   entrypoint = await import(pathToFileURL(join(packageDir, "dist", "index.js")).href);
 }, 120_000);
 
 afterAll(() => {
   rmSync(workDir, { recursive: true, force: true });
+  rmSync(consumerDir, { recursive: true, force: true });
 });
 
 describe("the published entrypoint", () => {
@@ -134,24 +156,10 @@ describe("the published bin", () => {
 describe("the installed package", () => {
   const isWindows = process.platform === "win32";
   const binName = isWindows ? "critical.cmd" : "critical";
-  let consumerDir: string;
   let link: string;
 
   beforeAll(() => {
-    consumerDir = mkdtempSync(join(tmpdir(), "critical-consumer-"));
-    writeFileSync(
-      join(consumerDir, "package.json"),
-      JSON.stringify({ name: "consumer", version: "1.0.0", private: true }),
-    );
-    execSync(`npm install --no-save --no-audit --no-fund --ignore-scripts "${tarballPath}"`, {
-      cwd: consumerDir,
-      stdio: "pipe",
-    });
     link = join(consumerDir, "node_modules", ".bin", binName);
-  }, 120_000);
-
-  afterAll(() => {
-    rmSync(consumerDir, { recursive: true, force: true });
   });
 
   it("links the critical bin", () => {
@@ -211,27 +219,29 @@ describe("the published manifest", () => {
  */
 describe("the bundled database", () => {
   it("extracts on first import", async () => {
-    const consumerDir = mkdtempSync(join(tmpdir(), "critical-bundled-"));
+    // A fresh install rather than a copy of packageDir, which would have no
+    // node_modules to resolve the dependency from.
+    const bundledDir = installTarball("critical-bundled-");
+    const installed = join(bundledDir, "node_modules", "@ecosyste-ms", "critical");
     try {
-      cpSync(packageDir, consumerDir, { recursive: true });
-      const dbPath = join(consumerDir, "critical-packages.db");
+      const dbPath = join(installed, "critical-packages.db");
       const gzPath = `${dbPath}.gz`;
 
       // A real database, gzipped where the published tarball would carry it.
-      const seed = join(consumerDir, "seed.db");
+      const seed = join(bundledDir, "seed.db");
       entrypoint.createDatabase(seed).close();
       await pipeline(createReadStream(seed), createGzip(), createWriteStream(gzPath));
       expect(existsSync(dbPath), "no database before the import").toBe(false);
 
       // A fresh URL, so this is a real first import rather than the module cache.
-      const url = `${pathToFileURL(join(consumerDir, "dist", "index.js")).href}?bundled`;
+      const url = `${pathToFileURL(join(installed, "dist", "index.js")).href}?bundled`;
       const mod = await import(url);
 
       expect(existsSync(dbPath), "import did not extract the bundled database").toBe(true);
       expect(mod.databasePath).toBe(dbPath);
       new DatabaseSync(dbPath, { readOnly: true }).close();
     } finally {
-      rmSync(consumerDir, { recursive: true, force: true });
+      rmSync(bundledDir, { recursive: true, force: true });
     }
   });
 });

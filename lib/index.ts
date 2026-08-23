@@ -6,6 +6,14 @@ import { DatabaseSync } from "node:sqlite";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { createGunzip } from "node:zlib";
+import {
+  createEcosystemsClient,
+  type EcosystemsClient,
+  type PackageWithRegistry,
+  PURL_TYPE_TO_REGISTRY,
+  parsePurl,
+  purlToRegistry,
+} from "@ecosyste-ms/ecosystems-ts";
 
 interface PackageManifest {
   name: string;
@@ -16,11 +24,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(
   await readFile(join(__dirname, "..", "package.json"), "utf8"),
 ) as PackageManifest;
-const USER_AGENT = `${pkg.name}/${pkg.version}`;
 const databasePath = join(__dirname, "..", "critical-packages.db");
 const gzPath = join(__dirname, "..", "critical-packages.db.gz");
 
-/** Repository metadata as `GET /packages/critical` serves it -- every field optional. */
+/**
+ * Every field optional and nullable.
+ *
+ * The OpenAPI spec marks most package fields required and non-null; the API omits them
+ * and sends explicit nulls. Modelling what actually arrives is what keeps the runtime
+ * guards below honest instead of looking redundant.
+ */
+type Loose<T> = { [K in keyof T]?: T[K] | null };
+
+/**
+ * Repository metadata as `GET /packages/critical` serves it -- every field optional.
+ *
+ * The API sends `full_name` ("owner/repo") but never `name`, and nests the host here
+ * rather than on the package. Both were previously read from the wrong place, which left
+ * `repo_metadata.repo_name` and `repo_metadata.host` NULL in every published build.
+ */
 export interface ApiRepoMetadata {
   owner?: string | null;
   name?: string | null;
@@ -31,55 +53,41 @@ export interface ApiRepoMetadata {
   open_issues_count?: number | null;
   archived?: boolean | null;
   fork?: boolean | null;
+  host?: ApiHost | null;
 }
 
-/** The registry host a package came from, as nested in the API's package objects. */
+/** The registry host, as nested inside `repo_metadata`. */
 export interface ApiHost {
   name?: string | null;
 }
 
-export interface ApiAdvisory {
-  uuid: string;
-  url?: string | null;
-  title?: string | null;
-  description?: string | null;
-  severity?: string | null;
-  published_at?: string | null;
-  cvss_score?: number | null;
-}
+/**
+ * An advisory as the API nests it in a package.
+ *
+ * Derived from the package schema rather than the SDK's top-level `Advisory`: the two
+ * specs describe the same objects differently -- `advisories.ecosyste.ms` types the
+ * optional fields `string | undefined`, while the copy embedded in a package uses
+ * `string | null`, which is what the API actually sends.
+ */
+type PackageAdvisory = NonNullable<PackageWithRegistry["advisories"]>[number];
+export type ApiAdvisory = Loose<PackageAdvisory>;
 
 /**
- * A package from `GET /packages/critical`.
+ * A package from `GET /packages/critical`, as the SDK types it.
  *
- * Only the fields this package stores are declared; the API sends more. The names are
- * the API's, not the schema's -- `latest_release_number` lands in
- * `packages.latest_version`.
+ * `repo_metadata` is overridden: the OpenAPI spec types it `Record<string, never>` -- a
+ * known-opaque object -- while this package reads nine fields out of it. Everything else
+ * is the generated shape.
+ *
+ * The spec is stricter than the API. It declares `normalized_licenses`, `purl` and
+ * `keywords_array` required and non-null; they are not always sent. Every runtime guard
+ * below stays regardless of what these types claim.
  */
-export interface ApiPackage {
-  id: number;
-  ecosystem: string;
-  name: string;
-  purl?: string | null;
-  namespace?: string | null;
-  description?: string | null;
-  homepage?: string | null;
-  repository_url?: string | null;
-  licenses?: string | null;
-  normalized_licenses?: string[] | null;
-  latest_release_number?: string | null;
-  versions_count?: number | null;
-  downloads?: number | null;
-  downloads_period?: string | null;
-  dependent_packages_count?: number | null;
-  dependent_repos_count?: number | null;
-  first_release_published_at?: string | null;
-  latest_release_published_at?: string | null;
-  last_synced_at?: string | null;
-  keywords_array?: string[] | null;
-  advisories?: (ApiAdvisory | null | undefined)[] | null;
-  repo_metadata?: ApiRepoMetadata | null;
-  host?: ApiHost | null;
-}
+export type ApiPackage = Loose<Omit<PackageWithRegistry, "repo_metadata" | "advisories">> &
+  Pick<PackageWithRegistry, "id" | "ecosystem" | "name"> & {
+    advisories?: (ApiAdvisory | null)[] | null;
+    repo_metadata?: ApiRepoMetadata | null;
+  };
 
 /** The single `build_info` row, written at the end of every build. */
 export interface BuildInfo {
@@ -95,6 +103,11 @@ export interface BuildOptions {
   dbPath?: string;
   fetchVersionsData?: boolean;
   onProgress?: ProgressReporter;
+  /**
+   * The API client. Defaults to the shared one; a substitute lets the tests drive the
+   * fetch loop's failure accounting without a network.
+   */
+  client?: Pick<EcosystemsClient, "listCriticalPackages" | "getVersionNumbers">;
 }
 
 // Extract via a uniquely named temp file, then rename into place. rename(2) is atomic
@@ -119,97 +132,86 @@ if (!existsSync(databasePath) && existsSync(gzPath)) {
   await extractDatabase(gzPath, databasePath);
 }
 
-const API_BASE = "https://packages.ecosyste.ms/api/v1";
-const PER_PAGE = 100;
-const RATE_LIMIT_MS = 50;
 const CONCURRENCY = 10;
-const MAX_RETRIES = 5;
-const RETRY_BASE_MS = 1000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Above this share of failed version fetches the build throws instead of publishing. */
+const MAX_VERSION_FAILURE_RATE = 0.05;
+
+/**
+ * The mailto that moves the build off the anonymous rate-limit tier.
+ *
+ * Anonymous is 5,000 requests/hour and a full build makes ~9,700, so an unidentified
+ * build gets throttled partway through. With a contact address the tier is "polite",
+ * 15,000.
+ */
+const CONTACT_EMAIL = process.env.ECOSYSTEMS_MAILTO?.trim() || undefined;
+
+let client: EcosystemsClient | undefined;
+
+/** The SDK client, created once. Owns retries, backoff, 429/Retry-After and pagination. */
+function ecosystemsClient(): EcosystemsClient {
+  if (!client) {
+    client = createEcosystemsClient({
+      userAgent: `${pkg.name}/${pkg.version}`,
+      from: CONTACT_EMAIL,
+    });
+  }
+  return client;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+/**
+ * The ecosyste.ms registry for a package, or null when there is nothing to query.
+ *
+ * Routed through the PURL where there is one: the SDK's table is keyed by PURL type, and
+ * that is the vocabulary the API sends.
+ *
+ * `ecosystem` is the fallback for a package with no PURL, translated through
+ * `ECOSYSTEM_TO_PURL_TYPE` first -- the two vocabularies disagree for four of the
+ * ecosystems here (`rubygems` vs `gem`, `go` vs `golang`, `packagist` vs `composer`,
+ * `homebrew` vs `brew`), and an unresolved registry means zero versions fetched with the
+ * build still reporting success.
+ */
+const ECOSYSTEM_TO_PURL_TYPE: Record<string, string> = {
+  rubygems: "gem",
+  go: "golang",
+  packagist: "composer",
+  homebrew: "brew",
+};
+
+function registryFor(pkg: { ecosystem?: string | null; purl?: string | null }): string | null {
+  if (pkg.purl) {
     try {
-      const response = await fetch(url, {
-        headers: { "User-Agent": USER_AGENT },
-      });
-      if (response.ok) return (await response.json()) as T;
-      // 4xx is a client error - don't retry. 5xx is server-side; retry.
-      if (response.status < 500) {
-        throw new Error(`HTTP ${response.status}: ${url}`);
-      }
-      lastErr = new Error(`HTTP ${response.status}: ${url}`);
-    } catch (err) {
-      // Network errors (fetch throws TypeError) are retryable.
-      const message = err instanceof Error ? err.message : undefined;
-      if (message?.startsWith("HTTP ") && !message.match(/HTTP 5\d\d/)) throw err;
-      lastErr = err;
-    }
-    if (attempt < MAX_RETRIES) {
-      await sleep(RETRY_BASE_MS * 2 ** attempt);
+      return purlToRegistry(parsePurl(pkg.purl));
+    } catch {
+      // Malformed PURL: fall through to the ecosystem string.
     }
   }
-  throw lastErr;
+  const ecosystem = pkg.ecosystem?.toLowerCase();
+  if (!ecosystem) return null;
+  const key = ECOSYSTEM_TO_PURL_TYPE[ecosystem] ?? ecosystem;
+  // Object.hasOwn, not a bare lookup: "constructor" is a valid key and would otherwise
+  // return Object itself -- truthy, typed string, and interpolated into a URL path.
+  const registry = Object.hasOwn(PURL_TYPE_TO_REGISTRY, key)
+    ? PURL_TYPE_TO_REGISTRY[key]
+    : undefined;
+  return registry || null;
 }
 
-async function fetchAllCriticalPackages(onProgress?: ProgressReporter): Promise<ApiPackage[]> {
-  const packages: ApiPackage[] = [];
-  let page = 1;
-
-  while (true) {
-    const url = `${API_BASE}/packages/critical?per_page=${PER_PAGE}&page=${page}`;
-    onProgress?.(`Fetching page ${page}...`);
-
-    const batch = await fetchJson<ApiPackage[]>(url);
-    if (batch.length === 0) break;
-
-    packages.push(...batch);
-    page++;
-
-    await sleep(RATE_LIMIT_MS);
-  }
-
-  return packages;
+async function fetchAllCriticalPackages(
+  onProgress?: ProgressReporter,
+  api: Pick<EcosystemsClient, "listCriticalPackages"> = ecosystemsClient(),
+): Promise<ApiPackage[]> {
+  onProgress?.("Fetching critical packages...");
+  const packages = await api.listCriticalPackages();
+  return packages as ApiPackage[];
 }
 
+/** Version numbers for a package, or `[]` when there is no registry to ask. Throws on
+ * transport failure -- the caller decides whether one package's loss is tolerable. */
 async function fetchVersionNumbers(ecosystem: string, name: string): Promise<string[]> {
-  const registry = ecosystemToRegistry(ecosystem);
+  const registry = registryFor({ ecosystem });
   if (!registry) return [];
-
-  const encodedName = encodeURIComponent(name);
-  const url = `${API_BASE}/registries/${registry}/packages/${encodedName}/version_numbers`;
-
-  try {
-    return await fetchJson<string[]>(url);
-  } catch {
-    return [];
-  }
-}
-
-function ecosystemToRegistry(ecosystem: string): string | null {
-  const map: Record<string, string> = {
-    npm: "npmjs.org",
-    pypi: "pypi.org",
-    rubygems: "rubygems.org",
-    go: "proxy.golang.org",
-    cargo: "crates.io",
-    maven: "repo1.maven.org",
-    nuget: "nuget.org",
-    packagist: "packagist.org",
-    hex: "hex.pm",
-    pub: "pub.dev",
-    hackage: "hackage.haskell.org",
-    cocoapods: "cocoapods.org",
-    conda: "anaconda.org",
-    clojars: "clojars.org",
-    puppet: "forge.puppet.com",
-    homebrew: "formulae.brew.sh",
-  };
-  return map[ecosystem.toLowerCase()] ?? null;
+  return await ecosystemsClient().getVersionNumbers(registry, name);
 }
 
 function createDatabase(dbPath: string): DatabaseSync {
@@ -377,9 +379,13 @@ function insertRepoMetadata(
   db: DatabaseSync,
   packageId: number,
   repoMetadata: ApiRepoMetadata | null | undefined,
-  host: ApiHost | null | undefined,
+  host?: ApiHost | null,
 ): void {
   if (!repoMetadata) return;
+
+  // The explicit argument stays for callers that have a host from somewhere else.
+  const hostName = host?.name ?? repoMetadata.host?.name ?? null;
+  const repoName = repoMetadata.name ?? repoMetadata.full_name?.split("/").pop() ?? null;
 
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO repo_metadata (
@@ -391,9 +397,9 @@ function insertRepoMetadata(
   stmt.run(
     packageId,
     repoMetadata.owner ?? null,
-    repoMetadata.name ?? null,
+    repoName,
     repoMetadata.full_name ?? null,
-    host?.name ?? null,
+    hostName,
     repoMetadata.language ?? null,
     repoMetadata.stargazers_count ?? null,
     repoMetadata.forks_count ?? null,
@@ -470,6 +476,7 @@ async function build(options: BuildOptions = {}): Promise<BuildInfo> {
     dbPath = "critical-packages.db",
     fetchVersionsData = true,
     onProgress = console.log,
+    client: api = ecosystemsClient(),
   } = options;
 
   await mkdir(dirname(dbPath) || ".", { recursive: true }).catch(() => {});
@@ -480,69 +487,103 @@ async function build(options: BuildOptions = {}): Promise<BuildInfo> {
   onProgress("Creating database...");
   const db = createDatabase(dbPath);
 
-  onProgress("Fetching critical packages...");
-  const packages = await fetchAllCriticalPackages(onProgress);
-  onProgress(`Found ${packages.length} critical packages`);
-
-  onProgress("Inserting packages...");
-  db.exec("BEGIN");
+  // Otherwise every throw below leaks the handle, which on Windows locks the file the
+  // caller is about to clean up. The version-failure threshold makes that a reachable
+  // path, not just a corrupt-data one.
   try {
-    for (const pkg of packages) {
-      insertPackage(db, pkg);
-      insertRepoMetadata(db, pkg.id, pkg.repo_metadata, pkg.host);
-      insertAdvisories(db, pkg.id, pkg.advisories);
+    onProgress("Fetching critical packages...");
+    const packages = await fetchAllCriticalPackages(onProgress, api);
+    onProgress(`Found ${packages.length} critical packages`);
+
+    onProgress("Inserting packages...");
+    db.exec("BEGIN");
+    try {
+      for (const pkg of packages) {
+        insertPackage(db, pkg);
+        insertRepoMetadata(db, pkg.id, pkg.repo_metadata);
+        insertAdvisories(db, pkg.id, pkg.advisories);
+      }
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
     }
-    db.exec("COMMIT");
-  } catch (err) {
-    db.exec("ROLLBACK");
-    throw err;
-  }
 
-  if (fetchVersionsData) {
-    onProgress("Fetching versions...");
-    let completed = 0;
-    const total = packages.length;
+    if (fetchVersionsData) {
+      onProgress("Fetching versions...");
+      let completed = 0;
+      const total = packages.length;
 
-    const processPackage = async (pkg: ApiPackage) => {
-      const versions = await fetchVersionNumbers(pkg.ecosystem, pkg.name);
-      await sleep(RATE_LIMIT_MS);
-      return { pkg, versions };
-    };
+      // One package failing is tolerable; a pattern of failures means the run was
+      // throttled. Count them and report at the end rather than swallowing each one.
+      let failed = 0;
+      let firstError: unknown;
 
-    // Process in batches with concurrency limit
-    for (let i = 0; i < packages.length; i += CONCURRENCY) {
-      const batch = packages.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(batch.map(processPackage));
-
-      db.exec("BEGIN");
-      try {
-        for (const { pkg, versions } of results) {
-          if (versions.length > 0) {
-            insertVersions(db, pkg.id, versions);
-          }
+      const processPackage = async (pkg: ApiPackage) => {
+        const registry = registryFor(pkg);
+        if (!registry) return { pkg, versions: [] as string[] };
+        try {
+          const versions = await api.getVersionNumbers(registry, pkg.name);
+          return { pkg, versions };
+        } catch (err) {
+          failed++;
+          firstError ??= err;
+          return { pkg, versions: [] as string[] };
         }
-        db.exec("COMMIT");
-      } catch (err) {
-        db.exec("ROLLBACK");
-        throw err;
+      };
+
+      // Process in batches with concurrency limit
+      for (let i = 0; i < packages.length; i += CONCURRENCY) {
+        const batch = packages.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(batch.map(processPackage));
+
+        db.exec("BEGIN");
+        try {
+          for (const { pkg, versions } of results) {
+            if (versions.length > 0) {
+              insertVersions(db, pkg.id, versions);
+            }
+          }
+          db.exec("COMMIT");
+        } catch (err) {
+          db.exec("ROLLBACK");
+          throw err;
+        }
+
+        completed += batch.length;
+        onProgress(`Fetched versions for ${completed}/${total} packages`);
       }
 
-      completed += batch.length;
-      onProgress(`Fetched versions for ${completed}/${total} packages`);
+      if (failed > 0) {
+        const share = ((failed / total) * 100).toFixed(1);
+        const reason = firstError instanceof Error ? firstError.message : String(firstError);
+        onProgress(`WARNING: version fetch failed for ${failed}/${total} packages (${share}%)`);
+        onProgress(`  first failure: ${reason}`);
+        // A run that loses this much is not a build worth publishing.
+        if (failed / total > MAX_VERSION_FAILURE_RATE) {
+          throw new Error(
+            `version fetch failed for ${share}% of packages (limit ${(
+              MAX_VERSION_FAILURE_RATE * 100
+            ).toFixed(0)}%); first failure: ${reason}`,
+          );
+        }
+      }
     }
+
+    updateBuildInfo(db);
+
+    const info = db
+      .prepare("SELECT * FROM build_info WHERE id = 1")
+      .get() as unknown as BuildInfo;
+    onProgress(
+      `Build complete: ${info.package_count} packages, ${info.version_count} versions, ${info.advisory_count} advisories`,
+    );
+
+    return info;
+  } finally {
+    // The success path returns through here too, and close() is not idempotent.
+    db.close();
   }
-
-  updateBuildInfo(db);
-
-  const info = db
-    .prepare("SELECT * FROM build_info WHERE id = 1")
-    .get() as unknown as BuildInfo;
-  onProgress(
-    `Build complete: ${info.package_count} packages, ${info.version_count} versions, ${info.advisory_count} advisories`,
-  );
-
-  db.close();
-  return info;
 }
 
 export {
@@ -556,4 +597,5 @@ export {
   insertPackage,
   insertRepoMetadata,
   insertVersions,
+  registryFor,
 };

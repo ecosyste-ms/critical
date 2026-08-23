@@ -24,6 +24,15 @@ Written in TypeScript and published with type declarations; the row shapes the b
 side works with (`ApiPackage`, `ApiAdvisory`, `ApiRepoMetadata`, `BuildInfo`) are
 exported as types.
 
+Since 1.3.0 the package has one runtime dependency, [`@ecosyste-ms/ecosystems-ts`][sdk],
+the typed client for the ecosyste.ms API. The build talks to the API through it rather
+than through a hand-rolled fetch layer, so retries, rate limiting and registry routing
+live in one place across the ecosyste.ms packages. The version is pinned exactly, since
+the daily job publishes unattended. Reading the bundled database still touches nothing
+but `node:sqlite`.
+
+[sdk]: https://github.com/ecosyste-ms/ecosystems-ts
+
 See [ecosyste-ms/mcp](https://github.com/ecosyste-ms/mcp) for a full example.
 
 ## Download
@@ -54,6 +63,16 @@ npx @ecosyste-ms/critical                    # full build with versions
 npx @ecosyste-ms/critical --skip-versions    # faster, packages only
 npx @ecosyste-ms/critical -o my-db.db        # custom output path
 npx @ecosyste-ms/critical --stats            # show database statistics
+```
+
+Set `ECOSYSTEMS_MAILTO` to a contact address before a full build. The ecosyste.ms API
+allows anonymous callers roughly 5,000 requests an hour and a full build makes around
+9,700; a build that identifies itself gets roughly 15,000. Without it most of the version
+fetches are rate-limited away, and `build()` throws rather than publish a database that
+lost more than 5% of its versions.
+
+```bash
+ECOSYSTEMS_MAILTO=you@example.com npx @ecosyste-ms/critical
 ```
 
 ## Development

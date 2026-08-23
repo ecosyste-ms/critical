@@ -35,7 +35,12 @@ jobs:
       - run: npm run test:packaged
 
       # The database build, which `npm run build` used to be before it became `tsc`.
+      # ECOSYSTEMS_MAILTO moves the ~9,700 requests off the anonymous rate-limit tier
+      # (~5,000/hour); without it most version fetches are throttled away and the build
+      # aborts rather than publish a database missing them.
       - run: npm run build:db
+        env:
+          ECOSYSTEMS_MAILTO: ${{ vars.ECOSYSTEMS_MAILTO }}
 
       - name: Get version
         id: version

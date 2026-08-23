@@ -7,18 +7,17 @@ import {
   insertRepoMetadata,
   insertVersions,
 } from "../lib/index.js";
-import { createTempDatabase, type TempDatabase } from "./helpers/db.js";
+import { createMemoryDatabase } from "./helpers/db.js";
 
-let fixture: TempDatabase;
+// In memory: these tests only exercise SQL.
 let db: DatabaseSync;
 
 beforeEach(() => {
-  fixture = createTempDatabase();
-  db = fixture.db;
+  db = createMemoryDatabase();
 });
 
 afterEach(() => {
-  fixture.cleanup();
+  db.close();
 });
 
 /** A package as `GET /packages/critical` serves it, advisories and repo metadata included. */
@@ -65,7 +64,6 @@ const API_PACKAGE: ApiPackage = {
   ],
   repo_metadata: {
     owner: "test",
-    name: "test-pkg",
     full_name: "test/test-pkg",
     language: "JavaScript",
     stargazers_count: 100,
@@ -73,8 +71,8 @@ const API_PACKAGE: ApiPackage = {
     open_issues_count: 5,
     archived: false,
     fork: false,
+    host: { name: "GitHub" },
   },
-  host: { name: "github.com" },
 };
 
 describe("insertPackage", () => {
@@ -209,20 +207,20 @@ describe("insertVersions", () => {
 });
 
 describe("insertRepoMetadata", () => {
-  it("stores metadata with its host", () => {
+  it("reads the host from inside repo_metadata", () => {
+    // The API nests the host here; it sends no `host` on the package at all.
     db.prepare(
       "INSERT INTO packages (id, ecosystem, name) VALUES (999, 'npm', 'test-pkg')",
     ).run();
 
-    insertRepoMetadata(db, 999, API_PACKAGE.repo_metadata, API_PACKAGE.host);
+    insertRepoMetadata(db, 999, API_PACKAGE.repo_metadata);
 
     const row = db.prepare("SELECT * FROM repo_metadata WHERE package_id = ?").get(999);
 
     expect(row).toMatchObject({
       owner: "test",
-      repo_name: "test-pkg",
       full_name: "test/test-pkg",
-      host: "github.com",
+      host: "GitHub",
       language: "JavaScript",
       stargazers_count: 100,
       archived: 0,
@@ -230,42 +228,69 @@ describe("insertRepoMetadata", () => {
     });
   });
 
-  it("handles partial metadata with no name and no host", () => {
-    // Real-world API shape: ~10% of critical packages have repo_metadata with full_name
-    // but no name field, and no host object at all. node:sqlite rejects undefined
-    // bindings, so these must be coerced to null.
-    db.prepare(`
-      INSERT INTO packages (id, ecosystem, name, purl)
-      VALUES (998, 'pypi', 'pytest-asyncio', 'pkg:pypi/pytest-asyncio')
-    `).run();
+  it("derives repo_name from full_name", () => {
+    // The API sends `full_name` ("owner/repo") and never `name`.
+    db.prepare(
+      "INSERT INTO packages (id, ecosystem, name) VALUES (998, 'pypi', 'pytest-asyncio')",
+    ).run();
 
-    const repoMetadata = {
+    insertRepoMetadata(db, 998, {
       full_name: "pytest-dev/pytest-asyncio",
       owner: "pytest-dev",
-      archived: false,
-      fork: false,
       stargazers_count: 1398,
-      open_issues_count: 52,
-      forks_count: 145,
-      // note: no `name`, no `language` -- and host is undefined below
-    };
-
-    expect(() => insertRepoMetadata(db, 998, repoMetadata, undefined)).not.toThrow();
+    });
 
     const row = db.prepare("SELECT * FROM repo_metadata WHERE package_id = ?").get(998);
 
     expect(row).toMatchObject({
       owner: "pytest-dev",
       full_name: "pytest-dev/pytest-asyncio",
-      repo_name: null,
-      host: null,
-      language: null,
+      repo_name: "pytest-asyncio",
       stargazers_count: 1398,
     });
   });
 
+  it("binds nulls for metadata carrying neither host nor full_name", () => {
+    // node:sqlite rejects undefined bindings, so every absent field must reach the bind
+    // as null.
+    db.prepare(
+      "INSERT INTO packages (id, ecosystem, name) VALUES (996, 'npm', 'sparse')",
+    ).run();
+
+    expect(() => insertRepoMetadata(db, 996, { owner: "someone" })).not.toThrow();
+
+    const row = db.prepare("SELECT * FROM repo_metadata WHERE package_id = ?").get(996);
+
+    expect(row).toMatchObject({
+      owner: "someone",
+      repo_name: null,
+      full_name: null,
+      host: null,
+      language: null,
+    });
+  });
+
+  it("prefers an explicit host argument over the nested one", () => {
+    db.prepare(
+      "INSERT INTO packages (id, ecosystem, name) VALUES (995, 'npm', 'explicit')",
+    ).run();
+
+    insertRepoMetadata(
+      db,
+      995,
+      { full_name: "a/b", host: { name: "GitHub" } },
+      {
+        name: "GitLab",
+      },
+    );
+
+    const row = db.prepare("SELECT * FROM repo_metadata WHERE package_id = ?").get(995);
+
+    expect(row?.host).toBe("GitLab");
+  });
+
   it("inserts nothing when there is no metadata", () => {
-    insertRepoMetadata(db, 997, null, { name: "github.com" });
+    insertRepoMetadata(db, 997, null);
 
     expect(db.prepare("SELECT * FROM repo_metadata WHERE package_id = ?").get(997)).toBe(
       undefined,
