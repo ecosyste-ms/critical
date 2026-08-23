@@ -1,15 +1,29 @@
 {
   "name": "@ecosyste-ms/critical",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "SQLite database of critical packages from ecosyste.ms",
-  "main": "./lib/index.js",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
-    "critical": "bin.js"
+    "critical": "dist/bin.js"
   },
   "scripts": {
-    "build": "node bin.js",
-    "test": "node test/index.js"
+    "build": "tsc -p tsconfig.build.json",
+    "build:db": "npm run build && node dist/bin.js",
+    "clean": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome check . && npm run typecheck",
+    "format": "biome check . --write",
+    "test": "vitest run",
+    "test:packaged": "npm run build && vitest run --config vitest.packaged.config.ts",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "ecosystems",
@@ -25,8 +39,8 @@
     "url": "git+https://github.com/ecosyste-ms/critical.git"
   },
   "files": [
+    "dist",
     "lib",
-    "bin.js",
     "README.md",
     "LICENSE",
     "critical-packages.db.gz"
@@ -36,5 +50,11 @@
   },
   "engines": {
     "node": ">=22.5.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.8",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }

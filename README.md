@@ -12,13 +12,17 @@ npm install @ecosyste-ms/critical
 
 The package includes a pre-built `critical-packages.db` file:
 
-```javascript
+```typescript
 import { databasePath } from '@ecosyste-ms/critical'
 import { DatabaseSync } from 'node:sqlite'
 
 const db = new DatabaseSync(databasePath)
 const pkg = db.prepare('SELECT * FROM packages WHERE name = ?').get('lodash')
 ```
+
+Written in TypeScript and published with type declarations; the row shapes the build
+side works with (`ApiPackage`, `ApiAdvisory`, `ApiRepoMetadata`, `BuildInfo`) are
+exported as types.
 
 See [ecosyste-ms/mcp](https://github.com/ecosyste-ms/mcp) for a full example.
 
@@ -51,6 +55,26 @@ npx @ecosyste-ms/critical --skip-versions    # faster, packages only
 npx @ecosyste-ms/critical -o my-db.db        # custom output path
 npx @ecosyste-ms/critical --stats            # show database statistics
 ```
+
+## Development
+
+```bash
+npm ci
+npm run build          # tsc: lib/*.ts -> dist/
+npm test               # vitest, against lib/ sources -- no build needed
+npm run test:packaged  # packs the tarball and tests what it ships
+npm run lint           # biome check + tsc --noEmit
+npm run format         # biome check --write
+npm run build:db       # build critical-packages.db from the API (what the daily job runs)
+```
+
+The default suite runs against `lib/` and needs no build step. `test:packaged` is
+separate because it builds, runs `npm pack`, and exercises the extracted tarball's
+entrypoint, export surface and `bin` — the checks that catch a broken `exports` map
+rather than broken logic.
+
+The published package is plain JavaScript, so consumers stay on the Node >= 22.5.0 floor
+that `node:sqlite` sets.
 
 ## Schema
 
