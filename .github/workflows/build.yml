@@ -27,9 +27,15 @@ jobs:
 
       - run: npm ci
 
+      - run: npm run lint
+
       - run: npm test
 
-      - run: npm run build
+      # Packs the tarball and exercises what it ships: entrypoint, exports and bin.
+      - run: npm run test:packaged
+
+      # The database build, which `npm run build` used to be before it became `tsc`.
+      - run: npm run build:db
 
       - name: Get version
         id: version
@@ -102,6 +108,10 @@ jobs:
 
       - name: Install latest npm
         run: npm install -g npm@latest
+
+      # prepublishOnly runs tsc, and dist/ is not committed, so this job needs the
+      # devDependencies installed before it can publish at all.
+      - run: npm ci
 
       - name: Set package version
         env:
