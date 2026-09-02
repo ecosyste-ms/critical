@@ -198,7 +198,10 @@ describe("the published manifest", () => {
     // npm reports corrections on stderr, so both streams have to be read.
     // One shell string, not an args array: node refuses to spawn npm.cmd without a
     // shell on Windows, and `shell` plus an args array is deprecated (DEP0190).
-    const result = spawnSync("npm publish --dry-run --access public", {
+    // --tag avoids npm comparing against the registry's published "latest": this
+    // repo's version and the daily-published version on npm are allowed to diverge,
+    // and without --tag npm refuses to dry-run publish once they do.
+    const result = spawnSync("npm publish --dry-run --access public --tag ci-dry-run", {
       cwd: projectRoot,
       encoding: "utf8",
       shell: true,
