@@ -55,7 +55,7 @@
     "@biomejs/biome": "^2.5.8",
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.1"
   },
   "dependencies": {
     "@ecosyste-ms/ecosystems-ts": "0.2.0"
