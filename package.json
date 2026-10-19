@@ -52,12 +52,12 @@
     "node": ">=22.5.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.8",
-    "@types/node": "^26.2.0",
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^26.6.5",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.5"
   },
   "dependencies": {
-    "@ecosyste-ms/ecosystems-ts": "0.2.0"
+    "@ecosyste-ms/ecosystems-ts": "^0.3.0"
   }
 }
